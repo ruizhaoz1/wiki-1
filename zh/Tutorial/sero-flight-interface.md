@@ -1,4 +1,4 @@
-# SERO Flight Interface (SFI) 接口说明
+# SERO Flight Interface (SFI) 接口说明 `v1.0.0-rc7`
 
 SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特点：
 
@@ -28,10 +28,12 @@ SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特
   3. 判断作废码`block.Nils`是否已经存在于之前保存的`UTXO`表中，如果存在，表明这个`UTXO`已经被用掉。
 * 发送交易（在线和离线）
   1. 选择需要转账的`UTXO`以及相关转账信息构造的参数调用`flight_genTxParam`，生成`txParam`。
-  2. 以`txParam`和私钥`sk`为参数调用离线签名方法`local_signTxWithSk`，生成待广播`tx`，并记录`txhash`
-  3. 以`tx`为参数调用`flight_commitTx`广播到全网。
-  4. 不断的以`txhash`为参数调用`flight_getTxReceipt`,获取到打包块号。
-  5. 确认32个块之后，还能从`flight_getTxReceipt`获取到数据则为成功交易。
+  2. 以`txParam`和私钥`sk`为参数调用离线签名方法`local_signTxWithSk`，生成待广播`tx`，并记录`txhash`。
+  3. 记录`local_signTxWithSk`的结果中的keys。
+  4. 以`tx`为参数调用`flight_commitTx`广播到全网。
+  5. 不断的以`txhash`为参数调用`flight_getTxReceipt`,获取到打包块号。
+  6. 确认32个块之后，还能从`flight_getTxReceipt`获取到数据则为成功交易。
+  7. 遇到纠纷的时候，可以拿出keys，调用`local_confirmOutZ`来解出明文数据。
 
 
 
@@ -59,7 +61,6 @@ SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特
      	"params": []
    }
   ```
-```
   
   * response
   ```javascript
@@ -68,7 +69,7 @@ SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特
   	"result": "0xc0bdec98290c5a2895e357a6f96f4f7f98b6750d37e77971a055579e7246c403"   //随机生成的seed，32byte的hex编码。
   	"error": null
   }
-```
+  ```
 
 * **由seed生成sk**
 
@@ -253,7 +254,35 @@ SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特
   }
   ```
 
-  
+
+下面是Go语言版的UTXO解析
+
+  ```go
+import 'github.com/sero-cash/go-sero/zero/txtool/flight'
+import 'github.com/sero-cash/go-sero/zero/txtool'
+import 'github.com/sero-cash/go-czero-import/cpt'
+//---------
+outs_str := '[{Root:"0x7b30cc8....510fbb122e",....,TxHash:"0x921b8......be44829"}}]'
+tk_str := '0xfd1b401d2bbfa09fba577b398b09b5ea075bd8f37773095c6e62271a4b080977'
+//---------
+cpt.ZeroInit_OnlyInOuts() //初始化
+//---------
+var outs []txtool.Out
+json.Unmarshal([]byte(outs_str),&outs)
+//---------
+bs, _ := hexutil.Decode(tk_str)
+tk := keys.Uint512{}
+copy(tk[:], bs)
+//---------
+douts,_=flight.DecOut(&tk,outs)
+  ```
+
+> **由于Go语言引用了C++库(libczero.so)，因此需要:**
+>
+> 1. 下载最新的go-czero-import工程，并跟go-sero工程放在相同的路径上。
+>    * <https://github.com/sero-cash/go-czero-import>
+> 2. 设置环境变量 LD_LIBRARY_PATH 指向 go-czero-import/czero/lib_[XXXX]
+>    * XXXX 根据自己的系统进行选择
 
 ### 离线签名
 
@@ -292,13 +321,90 @@ SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特
   		"Gas": "0x61a8",
   		"GasPrice": "0x3b9aca00",
   		"Hash": "0x813f69b7d60fe694ddfd6bec36e2adcba773a4518ee02354bd8f2f339f004a2e",
+      "Keys": [    //密文UTXO解析秘钥，不会提交到链上，可以保存作为确认证据。
+        "0x8e27d9fd65a178569b852cf71e476073b68c2f241074bbd7be712f145b84ee32", 
+        "0x6d83ce881db4fd68876c9a84f354124a01f94d53e702facb4db8071bc6ae146f"
+      ],
+      "Bases": [    //密文In解析秘钥，不会提交到链上，可以用flight_trace2Root提取Root。
+        "0x0000000000000000000000000000000000000000000000000000000000000000""
+      ],
   		"Tx": {}
   	},
   	"error": null
   }
   ```
 
-  
+
+也可以使用Go语言版的离线签名
+
+  ```go
+  import 'github.com/sero-cash/go-sero/zero/txtool/flight'
+  import 'github.com/sero-cash/go-sero/zero/txtool'
+  import 'github.com/sero-cash/go-czero-import/cpt'
+  param_str:='{"Gas":25000,"GasPrice":1000000000,"From":{"SKr":"0x0 .... }'  //由全节点构造
+  sk_str:='0xfd1b401d2bbfa09fba577b398b09b5ea075bd8f37773095c6e62271a4b080977'
+  //------
+  cpt.ZeroInit_OnlyInOuts() //初始化
+  //------
+  var param txtool.GTxParam
+  json.Unmarshal([]byte(param_str),&param)
+  bs, _ := hexutil.Decode(sk_str)
+  sk := keys.Uint512{}
+  copy(sk[:], bs)
+  //------可以自己组装SK---------
+  gtx, _:=flight.SignTx(sk,param)
+  //------
+  tx, _ := json.Marshal(&gtx)
+  ```
+
+
+
+### 确认UTXO
+
+在交易签名的时候，会为每个Desc_Z中的Out生成一个Key，用这个Key可以通过接口`local_confirmOutZ`反解出这个的UTXO的明文。
+
+- request
+
+  ```javascript
+  {
+  	"id": 0,
+  	"jsonrpc": "2.0",
+  	"method": "local_confirmOutZ",
+  	"params": [
+  		"0x8e27d9fd65a17....7be712f145b84ee32",    //Key 解密秘钥，签名的时候返回出来。
+  		{                                          //
+  			AssetCM: "0xb5c26....7bcdaf0425",
+  			EInfo: "0x589fa119....741e562c1",
+  			OutCM: "0xb1908....3e48c14",
+  			PKr: "0x1da430a....27b0126",
+  			Proof: "0x03eed61....b24ad9b2a",
+  			RPK: "0xc80da39....3263c2"
+  		}
+  	]
+  }
+  ```
+
+- response
+
+  ```javascript
+  {
+  	"id": 0,
+  	"result": {
+  		Asset: {
+  			Tkn: {
+  				Currency: "0x000000000....0000005345524f",
+  				Value: "1000"
+  			},
+  			Tkt: null
+  		},
+  		Memo: "0x0000000....00000000",
+  		Nils: null
+  	},
+  	"error": null
+  }
+  ```
+
+
 
 ### 币名接口
 
@@ -341,7 +447,7 @@ SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特
     {
       	"id": 0,
       	"jsonrpc": "2.0",
-      	"method": "local_currencyToId",
+      	"method": "local_idToCurrency",
       	"params": [
           "0x00000000....000005345524f"     //币种Id
         ]
@@ -369,7 +475,7 @@ SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特
 启动方式是：
 
 ```sh
-./gero --exchange --mineMode --datadir ~/geroData --port 53717 --rpc --rpcport 8545 --rpcapi exchange,sero,net --rpcaddr 127.0.0.1  --rpccorsdomain "*" --keystore ~/keystore --confirmedBlock 32 --rpcwritetimeout 1800 --exchangeValueStr
+./gero --mineMode --datadir ~/geroData --port 53717 --rpc --rpcport 8545 --rpcapi flight,sero --rpcaddr 127.0.0.1  --rpccorsdomain "*" --keystore ~/keystore --confirmedBlock 32 --rpcwritetimeout 1800 --exchangeValueStr
 ```
 
 
@@ -803,12 +909,12 @@ SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特
   	"id": 0,
   	"jsonrpc": "2.0",
   	"method": "flight_commitTx",
-  	"params": {    //local_signTxWithSk的输出
+  	"params": [{    //local_signTxWithSk的输出
   		"Gas": "0x61a8",
   		"GasPrice": "0x3b9aca00",
   		"Hash": "0x813f69b7d60fe694ddfd6bec36e2adcba773a4518ee02354bd8f2f339f004a2e",
   		"Tx": {...}
-  	}
+  	}]
   }
   ```
 
@@ -820,6 +926,39 @@ SFI接口是SSI的升级版，支持jsonrpc和console调用，并支持以下特
   {
   	"id": 0,
   	"result": null,    //成功返回null
+    "error": null,
+  }
+  ```
+
+  
+
+### 通过 TK 和 Trace 提取对应的Root
+
+在交易签名的时候，会为每个Desc_Z中的In生成一个Base，通过Base、Trace、TK三个值用`flight_trace2Root`可以提取该In对应的UTXO的Root。
+
+- request
+
+  ```javascript
+  {
+  	"id": 0,
+  	"jsonrpc": "2.0",
+  	"method": "flight_trace2Root",
+  	"params": [
+      "0xbb793767f......070f62f05",  //TK 跟踪秘钥
+      "0x0207f1a29......e7652eda1",  //Trace 原始Desc_Z.Ins 中的Trace字段
+      "0x000000000......000000000"   //签名之后对应的Base值
+    ]
+  }
+  ```
+
+  
+
+- response
+
+  ```javascript
+  {
+  	"id": 0,
+  	"result": "0x51182a6775......f07d1e49a095",    //Root值
     "error": null,
   }
   ```
